@@ -14,6 +14,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.halbertb.clipfinder.ClipFinderApp
 import com.halbertb.clipfinder.data.db.ImageEmbeddingEntity
+import com.halbertb.clipfinder.domain.computeDeletedMediaIdsForMembershipCleanup
 import com.halbertb.clipfinder.ml.clip.ClipOnnxEngine
 import com.halbertb.clipfinder.ml.floatArrayToLittleEndianBytes
 import com.halbertb.clipfinder.util.decodeBitmapForClip
@@ -28,6 +29,7 @@ class ScanImagesWorker(
     private val dao = app.database.imageEmbeddingDao()
     private val gallery = app.galleryRepository
     private val modelStore = app.modelStore
+    private val personAliasService = app.personAliasService
 
     override suspend fun doWork(): Result {
         var clip: ClipOnnxEngine? = null
@@ -46,17 +48,20 @@ class ScanImagesWorker(
             showProgressNotification(0, all.size, indeterminate = false)
             val galleryIds = all.map { it.id }.toHashSet()
             val storedIds = withContext(Dispatchers.IO) { dao.getAllMediaIds() }
-            val orphans = storedIds.filter { it !in galleryIds }
+            val orphans = computeDeletedMediaIdsForMembershipCleanup(storedIds, galleryIds)
             withContext(Dispatchers.IO) {
                 orphans.chunked(450).forEach { chunk ->
                     if (chunk.isNotEmpty()) dao.deleteByMediaIds(chunk)
                 }
             }
+            personAliasService.removeDeletedMemberships(orphans)
+            personAliasService.removeDeletedFaceEmbeddingCache(orphans)
 
             var processed = 0
             var indexedNow = 0
             var skippedUnchanged = 0
             var decodeFailures = 0
+            val changedMedia = ArrayList<com.halbertb.clipfinder.data.media.GalleryMedia>()
 
             for (media in all) {
                 if (isStopped) return Result.failure()
@@ -82,6 +87,7 @@ class ScanImagesWorker(
                         )
                     withContext(Dispatchers.IO) { dao.upsert(row) }
                     indexedNow++
+                    changedMedia.add(media)
                 } else {
                     decodeFailures++
                 }
@@ -89,6 +95,14 @@ class ScanImagesWorker(
                 processed++
                 setProgress(workDataOf(KEY_PROGRESS_DONE to processed, KEY_PROGRESS_TOTAL to all.size))
                 showProgressNotification(processed, all.size, indeterminate = false)
+            }
+
+            val aliasIds =
+                app.personAliasService
+                    .listAliases()
+                    .map { it.aliasId }
+            if (aliasIds.isNotEmpty() && changedMedia.isNotEmpty()) {
+                personAliasService.runIncrementalUpdate(aliasIds = aliasIds, media = changedMedia, provenance = "incremental")
             }
 
             val count = withContext(Dispatchers.IO) { dao.count() }

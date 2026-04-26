@@ -32,3 +32,11 @@ fun scoreIndexedImages(
         }
     return scored.sortedByDescending { it.score }.take(k.coerceAtLeast(1))
 }
+
+fun filterRowsByAllowedMediaIds(
+    rows: List<ImageEmbeddingEntity>,
+    allowedMediaIds: Set<Long>,
+): List<ImageEmbeddingEntity> {
+    if (allowedMediaIds.isEmpty()) return emptyList()
+    return rows.filter { it.mediaId in allowedMediaIds }
+}
