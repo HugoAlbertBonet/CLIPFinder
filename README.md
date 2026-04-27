@@ -33,13 +33,46 @@ No cloud account is required.
 - Internet connection for first-time model download
 - Optional notification permission for background status updates
 
+## Installation
+
+CLIP Finder is not published on Google Play. You can either sideload the prebuilt APK or build it yourself from source.
+
+### Option 1: Install the prebuilt APK
+
+1. On your Android device, go to **Settings → Apps → Special access → Install unknown apps** and allow your browser or file manager to install apps.
+2. Download `CLIPFinder.apk` from [this link](https://drive.google.com/file/d/1LCl9OI0g638JkNetpp6ftssuASd6gnms/view?usp=sharing) (or transfer it via USB / cloud storage).
+3. Open the APK file from your file manager and tap **Install**.
+4. If prompted by Play Protect, tap **Install anyway**.
+5. Launch **CLIP Finder** from your app drawer.
+
+### Option 2: Build from source
+
+Prerequisites:
+- JDK 17+
+- Android SDK (API 34 or newer) with build-tools installed
+- ADB and a connected Android device or emulator (Android 8.0+)
+
+Steps:
+
+```bash
+git clone <repo-url> CLIPFinder
+cd CLIPFinder
+
+./gradlew assembleDebug
+
+./gradlew installDebug
+```
+
+On Windows, use `gradlew.bat` instead of `./gradlew`.
+
 ## Getting Started
 
-1. **Install the app**
+1. **Install the app** (see [Installation](#installation))
 2. **Open CLIP Finder**
-3. **Download models** when prompted
-4. **Tap "Scan new photos (background)"** to index your library
-5. Go to **Search** and run your first prompt
+3. **Grant photo library permission** when prompted
+4. **Download models** when prompted (requires internet)
+5. **Tap "Scan new photos (background)"** to index your library
+6. Go to **Search** and run your first prompt
 
 ## Search Workflow
 
@@ -55,6 +88,8 @@ No cloud account is required.
 2. Enter an alias name
 3. Pick example photos of that person
 4. Tap **Create alias and start refinement**
+
+   > **Note:** The first alias creation is slow (typically around an hour) because the app builds its initial face index. Subsequent aliases usually complete in seconds. Refinement runs in the background, so you can leave the app and return once you receive the completion notification. If the job stalls or fails, delete the alias and recreate it — progress is cached, so it will resume near the point of failure within a few seconds.
 5. (Optional) Confirm/refuse items in **Validation preview**
 6. Use the alias filter in **Search**
 
