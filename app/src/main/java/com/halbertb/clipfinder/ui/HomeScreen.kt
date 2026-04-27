@@ -6,6 +6,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -60,15 +62,18 @@ import coil.compose.AsyncImage
 @Composable
 fun HomeRoute(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsState()
-    HomeScreen(state = state, viewModel = viewModel)
+    val debugViewModel: FaceDebugViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    HomeScreen(state = state, viewModel = viewModel, debugViewModel = debugViewModel)
 }
 
 @Composable
-private fun HomeScreen(state: MainUiState, viewModel: MainViewModel) {
+@OptIn(ExperimentalFoundationApi::class)
+private fun HomeScreen(state: MainUiState, viewModel: MainViewModel, debugViewModel: FaceDebugViewModel) {
     var previewUri by remember { mutableStateOf<Uri?>(null) }
     var previewClipScore by remember { mutableStateOf<Float?>(null) }
     var previewAliasConfidence by remember { mutableStateOf<Float?>(null) }
     var aliasExampleUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var showDebug by remember { mutableStateOf(false) }
     val pickAliasPhotosLauncher =
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 8),
@@ -101,10 +106,25 @@ private fun HomeScreen(state: MainUiState, viewModel: MainViewModel) {
                     onClick = { viewModel.setScreen("search") },
                     label = { Text("Search") },
                 )
-                FilterChip(
-                    selected = state.selectedScreen == "people",
-                    onClick = { viewModel.setScreen("people") },
-                    label = { Text("People") },
+                Box(
+                    modifier =
+                        Modifier.combinedClickable(
+                            onClick = { viewModel.setScreen("people") },
+                            onLongClick = { showDebug = true },
+                        ),
+                ) {
+                    FilterChip(
+                        selected = state.selectedScreen == "people",
+                        onClick = { viewModel.setScreen("people") },
+                        label = { Text("People") },
+                    )
+                }
+            }
+
+            if (showDebug) {
+                FaceDebugScreen(
+                    vm = debugViewModel,
+                    onClose = { showDebug = false },
                 )
             }
 

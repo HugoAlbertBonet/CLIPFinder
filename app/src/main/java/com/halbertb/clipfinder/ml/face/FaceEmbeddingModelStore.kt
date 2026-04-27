@@ -29,7 +29,7 @@ class FaceEmbeddingModelStore(private val context: Context) {
                 runCatching { modelFile.delete() }
             }
         }
-        onStatus("Downloading face recognition model (~5 MB)…")
+        onStatus("Downloading face recognition model (~166 MB)…")
         downloadFromAny(MODEL_URLS, modelFile)
         onStatus("Face model ready.")
     }
@@ -98,13 +98,12 @@ class FaceEmbeddingModelStore(private val context: Context) {
     }
 
     companion object {
-        private const val MODEL_FILENAME = "w600k_mbf.onnx"
-        // Known hash for official InsightFace w600k_mbf model artifact.
-        private const val MODEL_SHA256 = "9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f"
+        private const val MODEL_FILENAME = "w600k_r50.onnx"
+        // Known hash for InsightFace buffalo_l w600k_r50 model artifact.
+        private const val MODEL_SHA256 = "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
         private val MODEL_URLS =
             listOf(
-                "https://huggingface.co/spaces/reagvis/id-detector/resolve/main/w600k_mbf.onnx",
-                "https://huggingface.co/deepghs/insightface/resolve/4e1f33d3fe0e50a0945f3a53ab94ae8977ae7ddb/buffalo_s/w600k_mbf.onnx",
+                "https://huggingface.co/deepghs/insightface/resolve/4e1f33d3fe0e50a0945f3a53ab94ae8977ae7ddb/buffalo_l/w600k_r50.onnx",
             )
     }
 }

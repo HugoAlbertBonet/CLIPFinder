@@ -114,7 +114,7 @@ abstract class ClipDatabase : RoomDatabase() {
         private val MIGRATION_3_4 =
             object : Migration(3, 4) {
                 override fun migrate(db: SupportSQLiteDatabase) {
-                    db.execSQL("ALTER TABLE `person_aliases` ADD COLUMN `matchThreshold` REAL NOT NULL DEFAULT 0.78")
+                    db.execSQL("ALTER TABLE `person_aliases` ADD COLUMN `matchThreshold` REAL NOT NULL DEFAULT 0.40")
                 }
             }
 

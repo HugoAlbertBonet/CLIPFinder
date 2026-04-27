@@ -13,6 +13,7 @@ import com.halbertb.clipfinder.data.db.FaceEmbeddingCacheDao
 import com.halbertb.clipfinder.data.db.FaceEmbeddingCacheEntity
 import com.halbertb.clipfinder.data.db.PersonAliasDao
 import com.halbertb.clipfinder.data.db.PersonAliasEntity
+import com.halbertb.clipfinder.ml.face.AliasReferenceBundle
 import com.halbertb.clipfinder.ml.blobToFaceEmbeddings
 import com.halbertb.clipfinder.ml.faceEmbeddingsToBlob
 import com.halbertb.clipfinder.ml.floatArrayToLittleEndianBytes
@@ -74,7 +75,20 @@ class PersonAliasRepository(
     }
 
     suspend fun getAliasReferenceEmbeddings(aliasId: Long): List<FloatArray> =
-        referenceDao.getByAliasId(aliasId).map { littleEndianBytesToFloatArray(it.embedding) }
+        referenceDao
+            .getByAliasId(aliasId)
+            .filterNot { it.sourceUri == CENTROID_SOURCE_URI }
+            .map { littleEndianBytesToFloatArray(it.embedding) }
+
+    suspend fun getAliasReferenceBundle(aliasId: Long): AliasReferenceBundle {
+        val rows = referenceDao.getByAliasId(aliasId)
+        val centroid =
+            rows.firstOrNull { it.sourceUri == CENTROID_SOURCE_URI }?.let { littleEndianBytesToFloatArray(it.embedding) }
+        val refs =
+            rows.filterNot { it.sourceUri == CENTROID_SOURCE_URI }
+                .map { littleEndianBytesToFloatArray(it.embedding) }
+        return AliasReferenceBundle(centroid = centroid, references = refs)
+    }
 
     suspend fun upsertMemberships(rows: List<AliasPhotoMembershipEntity>) {
         if (rows.isNotEmpty()) membershipDao.upsertAllModel(rows)
@@ -157,6 +171,8 @@ class PersonAliasRepository(
     }
 
     companion object {
+        const val CENTROID_SOURCE_URI = "centroid://auto"
+
         fun normalizeAlias(alias: String): String = alias.trim().lowercase(Locale.ROOT)
     }
 }

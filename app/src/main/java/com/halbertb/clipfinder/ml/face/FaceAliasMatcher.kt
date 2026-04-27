@@ -6,15 +6,17 @@ import android.net.Uri
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
-import com.halbertb.clipfinder.ml.dot
 import com.halbertb.clipfinder.ml.l2Normalize
 import com.halbertb.clipfinder.util.decodeBitmapForClip
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import kotlin.math.max
-import kotlin.math.min
+
+data class AliasReferenceBundle(
+    val centroid: FloatArray?,
+    val references: List<FloatArray>,
+)
 
 data class FaceMatchResult(
     val confidence: Float,
@@ -28,9 +30,9 @@ class FaceAliasMatcher(
     private val detector by lazy {
         FaceDetection.getClient(
             FaceDetectorOptions.Builder()
-                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
                 .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-                .setMinFaceSize(0.1f)
+                .setMinFaceSize(0.05f)
                 .build(),
         )
     }
@@ -41,17 +43,34 @@ class FaceAliasMatcher(
     ): List<Pair<FloatArray, Uri>> =
         withContext(Dispatchers.Default) {
             uris.mapNotNull { uri ->
-                val faceEmbeddings = extractFaceEmbeddings(uri, faceEngine)
-                faceEmbeddings.firstOrNull()?.let { it to uri }
+                val faceEmbeddings = extractFaceEmbeddingsWithArea(uri, faceEngine)
+                faceEmbeddings.maxByOrNull { it.second }?.first?.let { it to uri }
             }
         }
+
+    fun buildCentroid(references: List<FloatArray>): FloatArray? {
+        return FaceScoring.buildCentroid(references)
+    }
 
     suspend fun extractFaceEmbeddings(
         imageUri: Uri,
         faceEngine: FaceEmbeddingEngine,
-        maxSide: Int = 1200,
+        maxSide: Int = 1600,
         perImageTimeoutMs: Long = PER_IMAGE_TIMEOUT_MS,
     ): List<FloatArray> =
+        extractFaceEmbeddingsWithArea(
+            imageUri = imageUri,
+            faceEngine = faceEngine,
+            maxSide = maxSide,
+            perImageTimeoutMs = perImageTimeoutMs,
+        ).map { it.first }
+
+    suspend fun extractFaceEmbeddingsWithArea(
+        imageUri: Uri,
+        faceEngine: FaceEmbeddingEngine,
+        maxSide: Int = 1600,
+        perImageTimeoutMs: Long = PER_IMAGE_TIMEOUT_MS,
+    ): List<Pair<FloatArray, Float>> =
         withContext(Dispatchers.Default) {
             val bitmap =
                 withContext(Dispatchers.IO) {
@@ -63,7 +82,7 @@ class FaceAliasMatcher(
                 } ?: return@withContext emptyList()
             try {
                 withTimeout(perImageTimeoutMs) {
-                    detectAndEmbedFaces(bitmap, faceEngine).map { it.first }
+                    detectAndEmbedFaces(bitmap, faceEngine)
                 }
             } finally {
                 if (!bitmap.isRecycled) bitmap.recycle()
@@ -72,35 +91,16 @@ class FaceAliasMatcher(
 
     fun scoreAliasMatch(
         faceEmbeddings: List<FloatArray>,
-        aliasReferences: List<FloatArray>,
-        strongThreshold: Float = 0.62f,
-        weakThreshold: Float = 0.52f,
-    ): FaceMatchResult {
-        if (aliasReferences.isEmpty() || faceEmbeddings.isEmpty()) {
-            return FaceMatchResult(0f, faceEmbeddings.size, "rejected")
-        }
-        val supportThreshold = (weakThreshold - 0.05f).coerceAtLeast(0.30f)
-        val minSupport = min(2, aliasReferences.size)
-        var best = -1f
-        var bestSupport = 0
-        for (emb in faceEmbeddings) {
-            val sims = aliasReferences.map { ref -> dot(emb, ref) }.sortedDescending()
-            val topK = sims.take(min(3, sims.size))
-            val avgTopK = if (topK.isEmpty()) -1f else topK.average().toFloat()
-            val support = sims.count { it >= supportThreshold }
-            if (avgTopK > best || (avgTopK == best && support > bestSupport)) {
-                best = avgTopK
-                bestSupport = support
-            }
-        }
-        val status =
-            when {
-                best >= strongThreshold && bestSupport >= minSupport -> "matched"
-                best >= weakThreshold -> "uncertain"
-                else -> "rejected"
-            }
-        return FaceMatchResult(confidence = best, faceCount = faceEmbeddings.size, status = status)
-    }
+        aliasReferenceBundle: AliasReferenceBundle,
+        strongThreshold: Float = 0.40f,
+        weakThreshold: Float = 0.33f,
+    ): FaceMatchResult =
+        FaceScoring.scoreAliasMatch(
+            faceEmbeddings = faceEmbeddings,
+            aliasReferenceBundle = aliasReferenceBundle,
+            strongThreshold = strongThreshold,
+            weakThreshold = weakThreshold,
+        )
 
     private suspend fun detectAndEmbedFaces(bitmap: Bitmap, faceEngine: FaceEmbeddingEngine): List<Pair<FloatArray, Float>> {
         val input = InputImage.fromBitmap(bitmap, 0)

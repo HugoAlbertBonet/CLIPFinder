@@ -220,14 +220,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     com.halbertb.clipfinder.domain.PersonAliasService.PREF_FACE_MODEL_MIGRATED_VERSION,
                     0,
                 )
-            if (migrated < 3) {
+            if (migrated < 4) {
                 val aliases = withContext(Dispatchers.IO) { personAliasService.listAliases() }
                 aliases.forEach { alias ->
                     workManager.cancelUniqueWork(AliasFullRefinementWorker.WORK_NAME_PREFIX + alias.aliasId)
                     workManager.cancelUniqueWork(AliasValidationPreviewWorker.WORK_NAME_PREFIX + alias.aliasId)
                 }
                 withContext(Dispatchers.IO) {
-                    personAliasService.migrateToFaceModelV2IfNeeded(prefs) { msg ->
+                    personAliasService.migrateFacePipelineIfNeeded(prefs) { msg ->
                         _state.update { s -> s.copy(statusMessage = msg) }
                     }
                 }

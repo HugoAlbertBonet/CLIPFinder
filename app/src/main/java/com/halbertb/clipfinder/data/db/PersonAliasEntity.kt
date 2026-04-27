@@ -18,5 +18,5 @@ data class PersonAliasEntity(
      * Cosine similarity above which a face is considered the alias.
      * User-tunable from the People tab. Calibrated for MobileFaceNet embeddings.
      */
-    val matchThreshold: Float = 0.55f,
+    val matchThreshold: Float = 0.40f,
 )

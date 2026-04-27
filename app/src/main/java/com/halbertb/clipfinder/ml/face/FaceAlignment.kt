@@ -2,14 +2,11 @@ package com.halbertb.clipfinder.ml.face
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PointF
 import android.graphics.Rect
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceLandmark
-import kotlin.math.atan2
-import kotlin.math.hypot
 import kotlin.math.min
 
 object FaceAlignment {
@@ -20,35 +17,49 @@ object FaceAlignment {
         if (leftEye == null || rightEye == null || nose == null) {
             return cropAndResizeFallback(bitmap, face.boundingBox)
         }
-
-        val roi = expandFaceRect(bitmap, face.boundingBox) ?: return null
-        val crop = Bitmap.createBitmap(bitmap, roi.left, roi.top, roi.width(), roi.height())
-        val out = Bitmap.createBitmap(OUTPUT_SIZE, OUTPUT_SIZE, Bitmap.Config.ARGB_8888)
-        try {
-            val srcDx = rightEye.x - leftEye.x
-            val srcDy = rightEye.y - leftEye.y
-            val srcDist = hypot(srcDx.toDouble(), srcDy.toDouble()).toFloat()
-            if (srcDist < 1f) return cropAndResizeFallback(bitmap, face.boundingBox)
-
-            val src = floatArrayOf(
-                leftEye.x - roi.left, leftEye.y - roi.top,
-                rightEye.x - roi.left, rightEye.y - roi.top,
-                nose.x - roi.left, nose.y - roi.top,
-            )
-            val dst = floatArrayOf(
-                LEFT_EYE.x, LEFT_EYE.y,
-                RIGHT_EYE.x, RIGHT_EYE.y,
-                NOSE.x, NOSE.y,
-            )
-            val matrix = Matrix()
-            val ok = matrix.setPolyToPoly(src, 0, dst, 0, 3)
-            if (!ok) return cropAndResizeFallback(bitmap, face.boundingBox)
-            val canvas = Canvas(out)
-            canvas.drawBitmap(crop, matrix, PAINT)
-            return out
-        } finally {
-            if (!crop.isRecycled) crop.recycle()
+        val mouthLeft = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
+        val mouthRight = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
+        return if (mouthLeft != null && mouthRight != null) {
+            alignFivePoint(bitmap, leftEye, rightEye, nose, mouthLeft, mouthRight)
+                ?: alignThreePoint(bitmap, leftEye, rightEye, nose)
+                ?: cropAndResizeFallback(bitmap, face.boundingBox)
+        } else {
+            alignThreePoint(bitmap, leftEye, rightEye, nose) ?: cropAndResizeFallback(bitmap, face.boundingBox)
         }
+    }
+
+    private fun alignFivePoint(
+        bitmap: Bitmap,
+        leftEye: PointF,
+        rightEye: PointF,
+        nose: PointF,
+        mouthLeft: PointF,
+        mouthRight: PointF,
+    ): Bitmap? {
+        val matrix =
+            FaceSimilarityTransform.estimate(
+                src = listOf(leftEye, rightEye, nose, mouthLeft, mouthRight),
+                dst = listOf(LEFT_EYE, RIGHT_EYE, NOSE, MOUTH_L, MOUTH_R),
+            ) ?: return null
+        val out = Bitmap.createBitmap(OUTPUT_SIZE, OUTPUT_SIZE, Bitmap.Config.ARGB_8888)
+        Canvas(out).drawBitmap(bitmap, matrix, PAINT)
+        return out
+    }
+
+    private fun alignThreePoint(
+        bitmap: Bitmap,
+        leftEye: PointF,
+        rightEye: PointF,
+        nose: PointF,
+    ): Bitmap? {
+        val matrix =
+            FaceSimilarityTransform.estimate(
+                src = listOf(leftEye, rightEye, nose),
+                dst = listOf(LEFT_EYE, RIGHT_EYE, NOSE),
+            ) ?: return null
+        val out = Bitmap.createBitmap(OUTPUT_SIZE, OUTPUT_SIZE, Bitmap.Config.ARGB_8888)
+        Canvas(out).drawBitmap(bitmap, matrix, PAINT)
+        return out
     }
 
     private fun cropAndResizeFallback(bitmap: Bitmap, box: Rect): Bitmap? {
@@ -77,6 +88,8 @@ object FaceAlignment {
     private val LEFT_EYE = PointF(38.2929f, 51.6963f)
     private val RIGHT_EYE = PointF(73.5318f, 51.5014f)
     private val NOSE = PointF(56.0252f, 71.7366f)
+    private val MOUTH_L = PointF(41.5493f, 92.3655f)
+    private val MOUTH_R = PointF(70.7299f, 92.2041f)
     private const val OUTPUT_SIZE = 112
     private val PAINT = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
 }

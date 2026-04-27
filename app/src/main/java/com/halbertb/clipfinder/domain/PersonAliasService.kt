@@ -11,9 +11,11 @@ import com.halbertb.clipfinder.ml.face.FaceAliasMatcher
 import com.halbertb.clipfinder.ml.face.FaceEmbeddingEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.halbertb.clipfinder.data.person.PersonAliasRepository.Companion.CENTROID_SOURCE_URI
+import java.io.File
 
 class PersonAliasService(
-    context: Context,
+    private val context: Context,
     private val repository: PersonAliasRepository,
     private val faceEmbeddingEngine: FaceEmbeddingEngine,
 ) {
@@ -24,12 +26,13 @@ class PersonAliasService(
     )
 
     private val matcher = FaceAliasMatcher(context)
-    private val faceCacheVersion = 2
+    private val faceCacheVersion = 3
     private val refinementBatchSize = 50
     private val checkpointInterval = 25
     private val progressInterval = 10
 
     suspend fun listAliases() = repository.listAliases()
+    suspend fun getAliasReferenceBundle(aliasId: Long) = repository.getAliasReferenceBundle(aliasId)
 
     suspend fun resolveAlias(normalizedAlias: String) = repository.getAliasByNormalized(normalizedAlias)
 
@@ -42,14 +45,16 @@ class PersonAliasService(
     }
 
     suspend fun getMatchThreshold(aliasId: Long): Float =
-        repository.getAliasById(aliasId)?.matchThreshold ?: 0.55f
+        repository.getAliasById(aliasId)?.matchThreshold ?: 0.40f
 
     suspend fun createAliasWithReferences(alias: String, sourceUris: List<Uri>): Long = withContext(Dispatchers.Default) {
         require(sourceUris.isNotEmpty()) { "Pick at least one reference photo." }
         val created = repository.createAlias(alias)
         val references = matcher.buildReferenceEmbeddings(sourceUris, faceEmbeddingEngine)
         require(references.isNotEmpty()) { "No face found in selected photos." }
-        repository.upsertAliasReferences(created.aliasId, references.map { it.first to it.second })
+        val centroid = matcher.buildCentroid(references.map { it.first })
+        val rows = references.map { it.first to it.second } + listOfNotNull(centroid?.let { it to Uri.parse(CENTROID_SOURCE_URI) })
+        repository.upsertAliasReferences(created.aliasId, rows)
         created.aliasId
     }
 
@@ -80,7 +85,7 @@ class PersonAliasService(
             ),
         )
         try {
-            val refs = repository.getAliasReferenceEmbeddings(aliasId)
+            val refs = repository.getAliasReferenceBundle(aliasId)
             val threshold = getMatchThreshold(aliasId)
             var done = 0
             for (item in media) {
@@ -165,8 +170,8 @@ class PersonAliasService(
         )
 
         val endExclusive = (processedBefore + maxItems).coerceAtMost(total)
-        val refs = repository.getAliasReferenceEmbeddings(aliasId)
-        if (refs.isEmpty()) {
+        val refs = repository.getAliasReferenceBundle(aliasId)
+        if (refs.references.isEmpty() && refs.centroid == null) {
             repository.updateRefinementState(
                 AliasRefinementStateEntity(
                     aliasId = aliasId,
@@ -288,8 +293,8 @@ class PersonAliasService(
 
     private suspend fun processMediaForAlias(aliasId: Long, media: List<GalleryMedia>, provenance: String): Int {
         if (media.isEmpty()) return 0
-        val refs = repository.getAliasReferenceEmbeddings(aliasId)
-        if (refs.isEmpty()) return 0
+        val refs = repository.getAliasReferenceBundle(aliasId)
+        if (refs.references.isEmpty() && refs.centroid == null) return 0
         val threshold = getMatchThreshold(aliasId)
         val rows = ArrayList<AliasPhotoMembershipEntity>(media.size)
         media.forEach { item ->
@@ -312,7 +317,7 @@ class PersonAliasService(
 
     private suspend fun matchWithCache(
         media: GalleryMedia,
-        aliasReferences: List<FloatArray>,
+        aliasReferenceBundle: com.halbertb.clipfinder.ml.face.AliasReferenceBundle,
         threshold: Float,
     ): com.halbertb.clipfinder.ml.face.FaceMatchResult {
         val faceEmbeddings =
@@ -323,10 +328,10 @@ class PersonAliasService(
                     extracted
                 }
         return matcher.scoreAliasMatch(
-            faceEmbeddings,
-            aliasReferences,
+            faceEmbeddings = faceEmbeddings,
+            aliasReferenceBundle = aliasReferenceBundle,
             strongThreshold = threshold,
-            weakThreshold = (threshold - 0.10f).coerceAtLeast(0.05f),
+            weakThreshold = (threshold - 0.07f).coerceAtLeast(0.05f),
         )
     }
 
@@ -342,10 +347,10 @@ class PersonAliasService(
         onProgress: suspend (Int, Int) -> Unit,
     ): Int = withContext(Dispatchers.Default) {
         if (media.isEmpty()) return@withContext 0
-        val refs = repository.getAliasReferenceEmbeddings(aliasId)
-        if (refs.isEmpty()) return@withContext 0
+        val refs = repository.getAliasReferenceBundle(aliasId)
+        if (refs.references.isEmpty() && refs.centroid == null) return@withContext 0
         val threshold = getMatchThreshold(aliasId)
-        val weak = (threshold - 0.10f).coerceAtLeast(0.05f)
+        val weak = (threshold - 0.07f).coerceAtLeast(0.05f)
         val pending = ArrayList<AliasPhotoMembershipEntity>(refinementBatchSize)
         var written = 0
         var processed = 0
@@ -354,7 +359,7 @@ class PersonAliasService(
             if (cached != null) {
                 val matched = matcher.scoreAliasMatch(
                     faceEmbeddings = cached,
-                    aliasReferences = refs,
+                    aliasReferenceBundle = refs,
                     strongThreshold = threshold,
                     weakThreshold = weak,
                 )
@@ -387,14 +392,15 @@ class PersonAliasService(
         written
     }
 
-    suspend fun migrateToFaceModelV2IfNeeded(
+    suspend fun migrateFacePipelineIfNeeded(
         prefs: SharedPreferences,
         onStatus: (String) -> Unit = {},
     ) {
         val migrated = prefs.getInt(PREF_FACE_MODEL_MIGRATED_VERSION, 0)
-        if (migrated >= 3) return
+        if (migrated >= 4) return
         repository.deleteAllAliasData()
-        prefs.edit().putInt(PREF_FACE_MODEL_MIGRATED_VERSION, 3).apply()
+        runCatching { File(context.filesDir, "models/w600k_mbf.onnx").delete() }
+        prefs.edit().putInt(PREF_FACE_MODEL_MIGRATED_VERSION, 4).apply()
         onStatus("Face pipeline updated. Old cached face embeddings were cleared; please re-create aliases.")
     }
 
