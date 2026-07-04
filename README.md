@@ -40,7 +40,7 @@ CLIP Finder is not published on Google Play. You can either sideload the prebuil
 ### Option 1: Install the prebuilt APK
 
 1. On your Android device, go to **Settings → Apps → Special access → Install unknown apps** and allow your browser or file manager to install apps.
-2. Download `CLIPFinder.apk` from [this link](https://drive.google.com/file/d/1LCl9OI0g638JkNetpp6ftssuASd6gnms/view?usp=sharing) (or transfer it via USB / cloud storage).
+2. Download `CLIPFinder.apk` from [this link](https://drive.google.com/file/d/15chZ0NtQJkGCO1U1cvQ5F1mHzcleAco7/view?usp=drive_link) (or transfer it via USB / cloud storage).
 3. Open the APK file from your file manager and tap **Install**.
 4. If prompted by Play Protect, tap **Install anyway**.
 5. Launch **CLIP Finder** from your app drawer.
