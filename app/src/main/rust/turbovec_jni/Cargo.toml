@@ -1,0 +1,12 @@
+[package]
+name = "clipfinder_turbovec"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "clipfinder_turbovec"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+turbovec = "0.9.0"

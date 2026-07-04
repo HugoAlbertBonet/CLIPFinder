@@ -17,6 +17,15 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.halbertb.clipfinder.ClipFinderApp
+import com.halbertb.clipfinder.domain.compression.CompressionEvaluation
+import com.halbertb.clipfinder.domain.compression.CompressionEvaluationReport
+import com.halbertb.clipfinder.domain.compression.CompressionMethod
+import com.halbertb.clipfinder.domain.CompressedImageSearch
+import com.halbertb.clipfinder.domain.CompressedIndexStore
+import com.halbertb.clipfinder.domain.CompressedSearchOutcome
+import com.halbertb.clipfinder.domain.SearchCompressionMode
+import com.halbertb.clipfinder.work.CompressDatabaseWorker
+import com.halbertb.clipfinder.domain.combinedSearchQuery
 import com.halbertb.clipfinder.domain.filterRowsByAllowedMediaIds
 import com.halbertb.clipfinder.domain.scoreIndexedImages
 import com.halbertb.clipfinder.ml.clip.ClipOnnxEngine
@@ -40,6 +49,11 @@ data class SearchResultItem(
     val clipScore: Float = score,
     /** Alias face-match confidence for this image, when an alias filter is applied. */
     val aliasConfidence: Float? = null,
+)
+
+private data class SearchRunOutcome(
+    val items: List<com.halbertb.clipfinder.domain.ScoredImage>,
+    val statusLabel: String,
 )
 
 data class PersonAliasItem(
@@ -92,6 +106,21 @@ data class MainUiState(
     val reclassifyDone: Int = 0,
     val reclassifyTotal: Int = 0,
     val busy: Boolean = false,
+    val compressionMethod: CompressionMethod = CompressionMethod.PCA,
+    val compressionSampleLimit: Int = 0,
+    val compressionEvalRunning: Boolean = false,
+    val compressionEvalProgress: String = "",
+    val compressionEvalError: String? = null,
+    val compressionReport: CompressionEvaluationReport? = null,
+    val showCompressModeDialog: Boolean = false,
+    val compressing: Boolean = false,
+    val compressProgress: String = "",
+    val compressedVectorCount: Int = 0,
+    val compressedModePref: String? = null,
+    val floatsRemoved: Boolean = false,
+    val pendingDeleteFloatsDialog: Boolean = false,
+    val compressStorageFloatBytes: Long = 0L,
+    val compressStorageIndexBytes: Long = 0L,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -103,6 +132,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val promptTranslator = app.promptTranslator
     private val personAliasService = app.personAliasService
     private val workManager = WorkManager.getInstance(app)
+    private val compressedImageSearch = CompressedImageSearch()
+    private val compressedIndexStore =
+        CompressedIndexStore(
+            context = app,
+            manifestDao = app.database.compressedIndexManifestDao(),
+            memberDao = app.database.compressedIndexMemberDao(),
+            embeddingDao = dao,
+        )
+    private val prefs = app.getSharedPreferences("clipfinder_prefs", android.content.Context.MODE_PRIVATE)
 
     private val _state = MutableStateFlow(MainUiState())
     val state: StateFlow<MainUiState> = _state.asStateFlow()
@@ -115,6 +153,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshCounts()
+        refreshCompressedIndexStatus()
         resumeScanMonitorIfNeeded()
         runFaceModelMigrationIfNeeded()
     }
@@ -122,7 +161,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshCounts() {
         viewModelScope.launch {
             val ready = modelStore.modelsReady()
-            val count = withContext(Dispatchers.IO) { dao.count() }
+            val count = withContext(Dispatchers.IO) { compressedIndexStore.indexedCount() }
+            if (count != _state.value.indexedCount) {
+                compressedImageSearch.invalidate()
+            }
             syncEngineIfPossible(ready)
             _state.update {
                 it.copy(
@@ -130,7 +172,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     indexedCount = count,
                 )
             }
+            refreshCompressedIndexStatus()
             refreshAliases()
+        }
+    }
+
+    private fun refreshCompressedIndexStatus() {
+        viewModelScope.launch {
+            val manifest = withContext(Dispatchers.IO) { compressedIndexStore.getManifest() }
+            _state.update {
+                it.copy(
+                    compressedVectorCount = manifest?.vectorCount ?: 0,
+                    compressedModePref = manifest?.modePref,
+                    floatsRemoved = manifest?.floatsRemoved == true,
+                )
+            }
         }
     }
 
@@ -148,6 +204,279 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setK(value: Int) {
         _state.update { it.copy(k = value.coerceIn(1, 50)) }
+    }
+
+    fun requestCompressDatabase() {
+        viewModelScope.launch {
+            if (!modelStore.modelsReady()) {
+                _state.update { it.copy(statusMessage = "Download CLIP models first.") }
+                return@launch
+            }
+            if (_state.value.floatsRemoved) {
+                _state.update { it.copy(statusMessage = "Float embeddings already removed.") }
+                return@launch
+            }
+            val hasFloats = withContext(Dispatchers.IO) { compressedIndexStore.hasFloatEmbeddings() }
+            if (!hasFloats) {
+                _state.update { it.copy(statusMessage = "No float embeddings to compress. Scan photos first.") }
+                return@launch
+            }
+            _state.update { it.copy(showCompressModeDialog = true) }
+        }
+    }
+
+    fun dismissCompressModeDialog() {
+        _state.update { it.copy(showCompressModeDialog = false) }
+    }
+
+    fun compressDatabase(mode: SearchCompressionMode) {
+        dismissCompressModeDialog()
+        viewModelScope.launch {
+            if (mode == SearchCompressionMode.FULL) return@launch
+            if (!modelStore.modelsReady()) {
+                _state.update { it.copy(statusMessage = "Download CLIP models first.") }
+                return@launch
+            }
+            val hasFloats = withContext(Dispatchers.IO) { compressedIndexStore.hasFloatEmbeddings() }
+            if (!hasFloats) {
+                _state.update { it.copy(statusMessage = "No float embeddings to compress. Scan photos first.") }
+                return@launch
+            }
+            try {
+                val request =
+                    OneTimeWorkRequestBuilder<CompressDatabaseWorker>()
+                        .setInputData(
+                            androidx.work.workDataOf(
+                                CompressDatabaseWorker.KEY_MODE_PREF to mode.prefValue,
+                                CompressDatabaseWorker.KEY_DELETE_FLOATS to false,
+                            ),
+                        )
+                        .build()
+                workManager.enqueueUniqueWork(
+                    CompressDatabaseWorker.WORK_NAME,
+                    ExistingWorkPolicy.REPLACE,
+                    request,
+                )
+                _state.update {
+                    it.copy(
+                        compressing = true,
+                        compressProgress = "Starting compression…",
+                        statusMessage = "Compressing database (${mode.title})…",
+                    )
+                }
+                monitorCompressDatabase()
+            } catch (t: Throwable) {
+                _state.update {
+                    it.copy(
+                        compressing = false,
+                        statusMessage = "Could not start compression: ${t.message}",
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissDeleteFloatsDialog() {
+        _state.update {
+            it.copy(
+                pendingDeleteFloatsDialog = false,
+                compressStorageFloatBytes = 0L,
+                compressStorageIndexBytes = 0L,
+            )
+        }
+    }
+
+    fun confirmDeleteFloatEmbeddings() {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { compressedIndexStore.markFloatsRemoved() }
+                compressedImageSearch.invalidate()
+                _state.update {
+                    it.copy(
+                        pendingDeleteFloatsDialog = false,
+                        compressStorageFloatBytes = 0L,
+                        compressStorageIndexBytes = 0L,
+                        floatsRemoved = true,
+                        statusMessage = "Float embeddings removed. Search now uses the compressed index only.",
+                    )
+                }
+                refreshCounts()
+            } catch (t: Throwable) {
+                _state.update {
+                    it.copy(
+                        pendingDeleteFloatsDialog = false,
+                        statusMessage = "Could not remove float embeddings: ${t.message}",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun monitorCompressDatabase() {
+        viewModelScope.launch {
+            while (true) {
+                val infos =
+                    withContext(Dispatchers.IO) {
+                        workManager.getWorkInfosForUniqueWork(CompressDatabaseWorker.WORK_NAME).get()
+                    }
+                val info = infos.firstOrNull() ?: break
+                when (info.state) {
+                    WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING -> {
+                        val progress = info.progress.getString(CompressDatabaseWorker.KEY_PROGRESS) ?: "Compressing…"
+                        _state.update {
+                            it.copy(
+                                compressing = true,
+                                compressProgress = progress,
+                            )
+                        }
+                        delay(1000)
+                    }
+                    WorkInfo.State.SUCCEEDED -> {
+                        val vectorCount = info.outputData.getInt(CompressDatabaseWorker.KEY_VECTOR_COUNT, 0)
+                        val floatsRemoved = info.outputData.getBoolean(CompressDatabaseWorker.KEY_FLOATS_REMOVED, false)
+                        val floatTableBytes = info.outputData.getLong(CompressDatabaseWorker.KEY_FLOAT_TABLE_BYTES, 0L)
+                        val compressedIndexBytes =
+                            info.outputData.getLong(CompressDatabaseWorker.KEY_COMPRESSED_INDEX_BYTES, 0L)
+                        compressedImageSearch.invalidate()
+                        _state.update {
+                            it.copy(
+                                compressing = false,
+                                compressProgress = "",
+                                compressedVectorCount = vectorCount,
+                                pendingDeleteFloatsDialog = !floatsRemoved,
+                                compressStorageFloatBytes = floatTableBytes,
+                                compressStorageIndexBytes = compressedIndexBytes,
+                                statusMessage =
+                                    "Compressed $vectorCount vectors. " +
+                                        if (floatsRemoved) {
+                                            "Float embeddings removed."
+                                        } else {
+                                            "Review and remove float copies to save space."
+                                        },
+                            )
+                        }
+                        refreshCounts()
+                        break
+                    }
+                    WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> {
+                        val error = info.outputData.getString(CompressDatabaseWorker.KEY_ERROR) ?: "Compression failed"
+                        _state.update {
+                            it.copy(
+                                compressing = false,
+                                compressProgress = "",
+                                statusMessage = error,
+                            )
+                        }
+                        break
+                    }
+                    WorkInfo.State.BLOCKED -> delay(500)
+                }
+            }
+        }
+    }
+
+    fun isCompressionModeAvailable(mode: SearchCompressionMode): Boolean =
+        when (mode) {
+            SearchCompressionMode.FULL -> true
+            SearchCompressionMode.TURBOVEC_4BIT,
+            SearchCompressionMode.TURBOQUANT_8BIT,
+            -> com.halbertb.clipfinder.domain.compression.NativeTurboVec.isAvailable
+        }
+
+    private fun resolveSearchCompressionMode(
+        manifest: com.halbertb.clipfinder.data.db.CompressedIndexManifestEntity?,
+    ): SearchCompressionMode {
+        if (manifest == null) return SearchCompressionMode.FULL
+        val mode = SearchCompressionMode.fromPref(manifest.modePref)
+        if (mode == SearchCompressionMode.FULL) return SearchCompressionMode.FULL
+        return if (java.io.File(manifest.filePath).exists()) mode else SearchCompressionMode.FULL
+    }
+
+    fun setCompressionMethod(method: CompressionMethod) {
+        _state.update { it.copy(compressionMethod = method, compressionReport = null, compressionEvalError = null) }
+    }
+
+    fun setCompressionSampleLimit(value: Int) {
+        _state.update { it.copy(compressionSampleLimit = value.coerceIn(0, 5000)) }
+    }
+
+    fun runCompressionEvaluation() {
+        viewModelScope.launch {
+            if (!modelStore.modelsReady()) {
+                _state.update { it.copy(compressionEvalError = "Download CLIP models first.") }
+                return@launch
+            }
+            if (!modelStore.tokenizerReady()) {
+                try {
+                    _state.update { it.copy(compressionEvalRunning = true, compressionEvalProgress = "Preparing tokenizer…") }
+                    modelStore.ensureTokenizer { msg -> _state.update { s -> s.copy(compressionEvalProgress = msg) } }
+                    tokenizer = null
+                } catch (e: Exception) {
+                    _state.update { it.copy(compressionEvalRunning = false, compressionEvalError = "Evaluation failed: ${e.message}") }
+                    return@launch
+                }
+            }
+            syncEngineIfPossible(true)
+            val clip = engine
+            if (clip == null) {
+                _state.update { it.copy(compressionEvalRunning = false, compressionEvalError = "CLIP engine not ready.") }
+                return@launch
+            }
+
+            val posText = _state.value.positivePrompt.trim()
+            if (posText.isEmpty()) {
+                _state.update { it.copy(compressionEvalError = "Enter a positive prompt first.") }
+                return@launch
+            }
+
+            _state.update {
+                it.copy(
+                    compressionEvalRunning = true,
+                    compressionEvalProgress = "Encoding query…",
+                    compressionEvalError = null,
+                    compressionReport = null,
+                )
+            }
+            try {
+                val translatedPos = withContext(Dispatchers.IO) { promptTranslator.toEnglish(posText) }
+                val posVec =
+                    withContext(Dispatchers.Default) {
+                        clip.encodeText(tokenizer().tokenizeTo77(translatedPos))
+                    }
+                val negText = _state.value.negativePrompt.trim()
+                val negVec =
+                    if (negText.isEmpty()) {
+                        null
+                    } else {
+                        val translatedNeg = withContext(Dispatchers.IO) { promptTranslator.toEnglish(negText) }
+                        withContext(Dispatchers.Default) {
+                            clip.encodeText(tokenizer().tokenizeTo77(translatedNeg))
+                        }
+                    }
+                var rows = withContext(Dispatchers.IO) { dao.getAll() }
+                val limit = _state.value.compressionSampleLimit
+                if (limit > 0 && rows.size > limit) rows = rows.take(limit)
+                val method = _state.value.compressionMethod
+                val queryK = _state.value.k
+                val report =
+                    withContext(Dispatchers.Default) {
+                        CompressionEvaluation.evaluate(rows, posVec, negVec, queryK, method) { msg ->
+                            _state.update { s -> s.copy(compressionEvalProgress = msg) }
+                        }
+                    }
+                _state.update {
+                    it.copy(
+                        compressionReport = report,
+                        compressionEvalProgress = "Done.",
+                        statusMessage = "Compression evaluation finished.",
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(compressionEvalError = "Evaluation failed: ${e.message}") }
+            } finally {
+                _state.update { it.copy(compressionEvalRunning = false) }
+            }
+        }
     }
 
     fun setAliasInput(value: String) {
@@ -829,7 +1158,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
 
                 val rows = withContext(Dispatchers.IO) { dao.getAll() }
-                if (rows.isEmpty()) {
+                val manifest = withContext(Dispatchers.IO) { compressedIndexStore.getManifest() }
+                val memberIds =
+                    if (manifest != null && (rows.isEmpty() || manifest.floatsRemoved)) {
+                        withContext(Dispatchers.IO) { app.database.compressedIndexMemberDao().getAllMediaIds() }
+                    } else {
+                        rows.map { it.mediaId }
+                    }
+                if (memberIds.isEmpty()) {
                     _state.update { it.copy(searchResults = emptyList(), statusMessage = "No indexed photos yet.") }
                     return@launch
                 }
@@ -840,26 +1176,92 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } else {
                         emptyMap()
                     }
-                val rowsFiltered =
+                val filteredMediaIds: List<Long> =
                     if (aliasId == null) {
-                        rows
+                        memberIds
                     } else {
-                        filterRowsByAllowedMediaIds(rows, confidenceMap.keys)
+                        memberIds.filter { confidenceMap.containsKey(it) }
                     }
-                if (rowsFiltered.isEmpty()) {
+                if (filteredMediaIds.isEmpty()) {
                     _state.update { it.copy(searchResults = emptyList(), statusMessage = "No indexed photos for selected alias.") }
                     return@launch
                 }
+                val rowsFiltered =
+                    if (rows.isNotEmpty()) {
+                        filterRowsByAllowedMediaIds(rows, filteredMediaIds.toSet())
+                    } else {
+                        emptyList()
+                    }
+                val allowlistMediaIds = filteredMediaIds.toLongArray()
 
                 val k = _state.value.k
                 val boost = aliasId != null && _state.value.boostByAliasConfidence
+                val compressionMode = resolveSearchCompressionMode(manifest)
                 // When boosting we score the full filtered set first so a high face
                 // confidence can lift a photo into the top-K it would otherwise miss.
-                val scoringK = if (boost) rowsFiltered.size else k
-                val scored =
+                val scoringK = if (boost) filteredMediaIds.size else k
+                val searchQuery = combinedSearchQuery(posVec, negVec)
+                val searchOutcome =
                     withContext(Dispatchers.Default) {
-                        scoreIndexedImages(rowsFiltered, posVec, negVec, scoringK)
+                        if (compressionMode == SearchCompressionMode.FULL) {
+                            if (rowsFiltered.isEmpty()) {
+                                SearchRunOutcome(
+                                    items = emptyList(),
+                                    statusLabel = "full precision (no float embeddings loaded)",
+                                )
+                            } else {
+                                SearchRunOutcome(
+                                    items = scoreIndexedImages(rowsFiltered, posVec, negVec, scoringK),
+                                    statusLabel = "full precision",
+                                )
+                            }
+                        } else {
+                            _state.update {
+                                it.copy(statusMessage = "Loading ${compressionMode.title} index…")
+                            }
+                            when (
+                                val outcome =
+                                    compressedImageSearch.search(
+                                        mode = compressionMode,
+                                        manifest = manifest,
+                                        floatRows = rowsFiltered.takeIf { it.isNotEmpty() },
+                                        allowlistMediaIds = allowlistMediaIds,
+                                        query = searchQuery,
+                                        k = scoringK,
+                                    )
+                            ) {
+                                is CompressedSearchOutcome.Success ->
+                                    SearchRunOutcome(
+                                        items = outcome.items,
+                                        statusLabel = "${compressionMode.title.lowercase()} (${outcome.searchElapsedMs} ms)",
+                                    )
+                                is CompressedSearchOutcome.Failed ->
+                                    if (rowsFiltered.isNotEmpty()) {
+                                        SearchRunOutcome(
+                                            items = scoreIndexedImages(rowsFiltered, posVec, negVec, scoringK),
+                                            statusLabel = "full precision (fallback: ${outcome.message})",
+                                        )
+                                    } else {
+                                        SearchRunOutcome(
+                                            items = emptyList(),
+                                            statusLabel = outcome.message,
+                                        )
+                                    }
+                                CompressedSearchOutcome.Unsupported ->
+                                    SearchRunOutcome(
+                                        items =
+                                            if (rowsFiltered.isNotEmpty()) {
+                                                scoreIndexedImages(rowsFiltered, posVec, negVec, scoringK)
+                                            } else {
+                                                emptyList()
+                                            },
+                                        statusLabel = "full precision",
+                                    )
+                            }
+                        }
                     }
+                val scored = searchOutcome.items
+                val compressionStatus = searchOutcome.statusLabel
                 val finalItems =
                     if (!boost) {
                         scored.map { s ->
@@ -891,7 +1293,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update {
                     it.copy(
                         searchResults = finalItems,
-                        statusMessage = "Showing top ${finalItems.size} results.",
+                        statusMessage = "Showing top ${finalItems.size} results ($compressionStatus).",
                     )
                 }
             } catch (e: Exception) {

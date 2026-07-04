@@ -10,6 +10,7 @@ plugins {
 android {
     namespace = "com.halbertb.clipfinder"
     compileSdk = 35
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "com.halbertb.clipfinder"
@@ -40,6 +41,31 @@ android {
     buildFeatures { compose = true }
 
     packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
+}
+
+val cargoBuildTurbovec by tasks.registering(Exec::class) {
+    val cargo = "${System.getProperty("user.home")}/.cargo/bin/cargo"
+    val androidSdk = android.sdkDirectory
+    val ndkDir = androidSdk.resolve("ndk/27.2.12479018")
+    workingDir = file("src/main/rust/turbovec_jni")
+    environment("ANDROID_HOME", androidSdk.absolutePath)
+    environment("ANDROID_SDK_ROOT", androidSdk.absolutePath)
+    environment("ANDROID_NDK_HOME", ndkDir.absolutePath)
+    environment("PATH", "${System.getProperty("user.home")}/.cargo/bin:${System.getenv("PATH")}")
+    commandLine(
+        cargo,
+        "ndk",
+        "-t",
+        "arm64-v8a",
+        "-t",
+        "x86_64",
+        "-o",
+        file("src/main/jniLibs").absolutePath,
+        "--platform",
+        "26",
+        "build",
+        "--release",
+    )
 }
 
 dependencies {
@@ -115,4 +141,7 @@ tasks.register("downloadClipOnnxModels") {
     }
 }
 
-tasks.named("preBuild").configure { dependsOn("downloadClipBpe") }
+tasks.named("preBuild").configure {
+    dependsOn("downloadClipBpe")
+    dependsOn(cargoBuildTurbovec)
+}

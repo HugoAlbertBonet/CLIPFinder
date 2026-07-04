@@ -26,6 +26,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -39,15 +43,19 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,6 +66,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
+import com.halbertb.clipfinder.domain.SearchCompressionMode
+import com.halbertb.clipfinder.util.formatStorageBytes
 
 @Composable
 fun HomeRoute(viewModel: MainViewModel) {
@@ -74,6 +84,8 @@ private fun HomeScreen(state: MainUiState, viewModel: MainViewModel, debugViewMo
     var previewAliasConfidence by remember { mutableStateOf<Float?>(null) }
     var aliasExampleUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var showDebug by remember { mutableStateOf(false) }
+    var searchTapCount by rememberSaveable { mutableStateOf(0) }
+    var developerUnlocked by rememberSaveable { mutableStateOf(false) }
     val pickAliasPhotosLauncher =
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 8),
@@ -103,20 +115,46 @@ private fun HomeScreen(state: MainUiState, viewModel: MainViewModel, debugViewMo
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
                     selected = state.selectedScreen == "search",
-                    onClick = { viewModel.setScreen("search") },
+                    onClick = {
+                        val nextTapCount = searchTapCount + 1
+                        if (nextTapCount >= 5) {
+                            developerUnlocked = true
+                            searchTapCount = 0
+                            viewModel.setScreen("developer")
+                        } else {
+                            searchTapCount = nextTapCount
+                            viewModel.setScreen("search")
+                        }
+                    },
                     label = { Text("Search") },
                 )
                 Box(
                     modifier =
                         Modifier.combinedClickable(
-                            onClick = { viewModel.setScreen("people") },
+                            onClick = {
+                                searchTapCount = 0
+                                viewModel.setScreen("people")
+                            },
                             onLongClick = { showDebug = true },
                         ),
                 ) {
                     FilterChip(
                         selected = state.selectedScreen == "people",
-                        onClick = { viewModel.setScreen("people") },
+                        onClick = {
+                            searchTapCount = 0
+                            viewModel.setScreen("people")
+                        },
                         label = { Text("People") },
+                    )
+                }
+                if (developerUnlocked) {
+                    FilterChip(
+                        selected = state.selectedScreen == "developer",
+                        onClick = {
+                            searchTapCount = 0
+                            viewModel.setScreen("developer")
+                        },
+                        label = { Text("Developer") },
                     )
                 }
             }
@@ -180,12 +218,54 @@ private fun HomeScreen(state: MainUiState, viewModel: MainViewModel, debugViewMo
 
                     Button(
                         onClick = { viewModel.scanNewPhotos() },
-                        enabled = !state.busy && state.modelsReady,
+                        enabled = !state.busy && state.modelsReady && !state.compressing,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Icon(Icons.Outlined.PhotoLibrary, contentDescription = null)
                         Spacer(Modifier.size(8.dp))
                         Text("Scan new photos (background)")
+                    }
+
+                    OutlinedButton(
+                        onClick = { viewModel.requestCompressDatabase() },
+                        enabled =
+                            !state.busy &&
+                                !state.scanning &&
+                                !state.compressing &&
+                                state.modelsReady &&
+                                !state.floatsRemoved,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Outlined.Storage, contentDescription = null)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Compress database")
+                    }
+
+                    if (state.compressing) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text(
+                            text = state.compressProgress.ifBlank { "Compressing…" },
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+
+                    if (state.compressedVectorCount > 0) {
+                        Text(
+                            text =
+                                buildString {
+                                    append("Compressed index: ${state.compressedVectorCount} vectors")
+                                    state.compressedModePref?.let { pref ->
+                                        append(" (")
+                                        append(SearchCompressionMode.fromPref(pref).title)
+                                        append(")")
+                                    }
+                                    if (state.floatsRemoved) {
+                                        append(" — floats removed")
+                                    }
+                                },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
 
                     if (state.scanning && state.scanTotal > 0) {
@@ -261,6 +341,19 @@ private fun HomeScreen(state: MainUiState, viewModel: MainViewModel, debugViewMo
                             valueRange = 1f..50f,
                             steps = 48,
                         )
+                        if (state.compressedVectorCount > 0 && state.compressedModePref != null) {
+                            val activeMode = SearchCompressionMode.fromPref(state.compressedModePref)
+                            Text(
+                                text =
+                                    if (state.floatsRemoved) {
+                                        "Search uses ${activeMode.title} (${activeMode.typicalSearchMs} ms typical)."
+                                    } else {
+                                        "Search uses ${activeMode.title} index; float copies still on disk until you remove them."
+                                    },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         Button(
                             onClick = { viewModel.search() },
                             enabled = !state.busy && state.modelsReady,
@@ -272,6 +365,8 @@ private fun HomeScreen(state: MainUiState, viewModel: MainViewModel, debugViewMo
                         }
                     }
                 }
+            } else if (state.selectedScreen == "developer") {
+                DeveloperCompressionScreen(state = state, viewModel = viewModel)
             } else {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -507,6 +602,64 @@ private fun HomeScreen(state: MainUiState, viewModel: MainViewModel, debugViewMo
         }
     }
 
+    if (state.showCompressModeDialog) {
+        CompressModeChoiceDialog(
+            isAvailable = viewModel::isCompressionModeAvailable,
+            onDismiss = { viewModel.dismissCompressModeDialog() },
+            onConfirm = { viewModel.compressDatabase(it) },
+        )
+    }
+
+    if (state.pendingDeleteFloatsDialog) {
+        val floatBytes = state.compressStorageFloatBytes
+        val indexBytes = state.compressStorageIndexBytes
+        val totalKept = floatBytes + indexBytes
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissDeleteFloatsDialog() },
+            title = { Text("Remove float embeddings?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Compression finished. Here is how much space the search index uses on disk:",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    MetricLine(
+                        label = "Float embeddings (SQLite)",
+                        value = formatStorageBytes(floatBytes),
+                    )
+                    MetricLine(
+                        label = "Compressed index file",
+                        value = formatStorageBytes(indexBytes),
+                    )
+                    MetricLine(
+                        label = "Total if you keep both",
+                        value = formatStorageBytes(totalKept),
+                    )
+                    MetricLine(
+                        label = "Total if you remove floats",
+                        value = formatStorageBytes(indexBytes),
+                    )
+                    Text(
+                        text = "Removing floats frees ${formatStorageBytes(floatBytes)}. " +
+                            "Full-precision search will be unavailable until you scan again.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.confirmDeleteFloatEmbeddings() }) {
+                    Text("Remove floats")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissDeleteFloatsDialog() }) {
+                    Text("Keep floats")
+                }
+            },
+        )
+    }
+
     if (previewUri != null) {
         ImagePreviewDialog(
             uri = previewUri!!,
@@ -517,6 +670,141 @@ private fun HomeScreen(state: MainUiState, viewModel: MainViewModel, debugViewMo
                 previewClipScore = null
                 previewAliasConfidence = null
             },
+        )
+    }
+}
+
+@Composable
+private fun CompressModeChoiceDialog(
+    isAvailable: (SearchCompressionMode) -> Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (SearchCompressionMode) -> Unit,
+) {
+    var selected by remember { mutableStateOf(SearchCompressionMode.TURBOQUANT_8BIT) }
+    val selectableModes =
+        listOf(
+            SearchCompressionMode.TURBOVEC_4BIT,
+            SearchCompressionMode.TURBOQUANT_8BIT,
+        )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Choose compression") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Pick how aggressively to compress your scanned embeddings. Search will use this index after compression.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    text = "Rank shift: lower is better. Recall@K: higher is better.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                selectableModes.forEach { mode ->
+                    val enabled = isAvailable(mode)
+                    val isSelected = selected == mode
+                    Card(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .then(
+                                    if (enabled) {
+                                        Modifier.clickable { selected = mode }
+                                    } else {
+                                        Modifier
+                                    },
+                                )
+                                .border(
+                                    width = if (isSelected) 2.dp else 1.dp,
+                                    color =
+                                        when {
+                                            isSelected -> MaterialTheme.colorScheme.primary
+                                            enabled -> MaterialTheme.colorScheme.outlineVariant
+                                            else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                                        },
+                                    shape = RoundedCornerShape(12.dp),
+                                ),
+                        colors =
+                            CardDefaults.cardColors(
+                                containerColor =
+                                    if (isSelected) {
+                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                    },
+                            ),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = { if (enabled) selected = mode },
+                                    enabled = enabled,
+                                )
+                                Text(mode.title, style = MaterialTheme.typography.titleSmall)
+                            }
+                            Text(mode.summary, style = MaterialTheme.typography.bodySmall)
+                            MetricLine(label = "Typical search", value = mode.speedupLabel)
+                            MetricLine(
+                                label = "Mean rank shift vs full precision",
+                                value = "%.1f".format(mode.meanRankShift),
+                            )
+                            MetricLine(label = "Recall@K vs full precision", value = "${mode.recallPercent}%")
+                            MetricLine(label = "Index memory", value = mode.memoryLabel)
+                            if (!enabled) {
+                                Text(
+                                    text = "Unavailable on this device (native library missing).",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(selected) },
+                enabled = isAvailable(selected),
+            ) {
+                Text("Start compression")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+@Composable
+private fun MetricLine(
+    label: String,
+    value: String,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(start = 8.dp),
         )
     }
 }

@@ -10,17 +10,21 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 @Database(
     entities = [
         ImageEmbeddingEntity::class,
+        CompressedIndexManifestEntity::class,
+        CompressedIndexMemberEntity::class,
         PersonAliasEntity::class,
         AliasReferenceFaceEntity::class,
         AliasPhotoMembershipEntity::class,
         AliasRefinementStateEntity::class,
         FaceEmbeddingCacheEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class ClipDatabase : RoomDatabase() {
     abstract fun imageEmbeddingDao(): ImageEmbeddingDao
+    abstract fun compressedIndexManifestDao(): CompressedIndexManifestDao
+    abstract fun compressedIndexMemberDao(): CompressedIndexMemberDao
     abstract fun personAliasDao(): PersonAliasDao
     abstract fun aliasReferenceFaceDao(): AliasReferenceFaceDao
     abstract fun aliasPhotoMembershipDao(): AliasPhotoMembershipDao
@@ -118,11 +122,44 @@ abstract class ClipDatabase : RoomDatabase() {
                 }
             }
 
+        private val MIGRATION_4_5 =
+            object : Migration(4, 5) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS `compressed_index_manifest` (
+                            `id` INTEGER NOT NULL,
+                            `modePref` TEXT NOT NULL,
+                            `filePath` TEXT NOT NULL,
+                            `dimension` INTEGER NOT NULL,
+                            `vectorCount` INTEGER NOT NULL,
+                            `builtAtEpochMs` INTEGER NOT NULL,
+                            `floatsRemoved` INTEGER NOT NULL,
+                            PRIMARY KEY(`id`)
+                        )
+                        """.trimIndent(),
+                    )
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS `compressed_index_members` (
+                            `mediaId` INTEGER NOT NULL,
+                            `dateModifiedSec` INTEGER NOT NULL,
+                            PRIMARY KEY(`mediaId`)
+                        )
+                        """.trimIndent(),
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_compressed_index_members_dateModifiedSec` ON `compressed_index_members` (`dateModifiedSec`)",
+                    )
+                }
+            }
+
         fun build(context: Context): ClipDatabase =
             Room.databaseBuilder(context, ClipDatabase::class.java, "clipfinder.db")
                 .addMigrations(MIGRATION_1_2)
                 .addMigrations(MIGRATION_2_3)
                 .addMigrations(MIGRATION_3_4)
+                .addMigrations(MIGRATION_4_5)
                 .fallbackToDestructiveMigration()
                 .build()
     }

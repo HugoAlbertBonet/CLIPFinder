@@ -22,6 +22,9 @@ interface ImageEmbeddingDao {
     @Query("DELETE FROM image_embeddings WHERE mediaId IN (:ids)")
     suspend fun deleteByMediaIds(ids: List<Long>)
 
+    @Query("DELETE FROM image_embeddings")
+    suspend fun deleteAll()
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: ImageEmbeddingEntity)
 }

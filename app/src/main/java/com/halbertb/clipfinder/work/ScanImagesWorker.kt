@@ -13,8 +13,12 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.halbertb.clipfinder.ClipFinderApp
+import com.halbertb.clipfinder.data.db.CompressedIndexMemberEntity
 import com.halbertb.clipfinder.data.db.ImageEmbeddingEntity
+import com.halbertb.clipfinder.domain.CompressedIndexStore
+import com.halbertb.clipfinder.domain.SearchCompressionMode
 import com.halbertb.clipfinder.domain.computeDeletedMediaIdsForMembershipCleanup
+import com.halbertb.clipfinder.domain.compression.NativeTurboVecIndex
 import com.halbertb.clipfinder.ml.clip.ClipOnnxEngine
 import com.halbertb.clipfinder.ml.floatArrayToLittleEndianBytes
 import com.halbertb.clipfinder.util.decodeBitmapForClip
@@ -27,6 +31,15 @@ class ScanImagesWorker(
 ) : CoroutineWorker(appContext, workerParams) {
     private val app = applicationContext as ClipFinderApp
     private val dao = app.database.imageEmbeddingDao()
+    private val memberDao = app.database.compressedIndexMemberDao()
+    private val manifestDao = app.database.compressedIndexManifestDao()
+    private val compressedStore =
+        CompressedIndexStore(
+            context = app,
+            manifestDao = manifestDao,
+            memberDao = memberDao,
+            embeddingDao = dao,
+        )
     private val gallery = app.galleryRepository
     private val modelStore = app.modelStore
     private val personAliasService = app.personAliasService
@@ -43,6 +56,10 @@ class ScanImagesWorker(
                     visionModelFile = modelStore.visionFile,
                     textModelFile = modelStore.textFile,
                 )
+            val manifest = withContext(Dispatchers.IO) { manifestDao.get() }
+            if (manifest != null && manifest.floatsRemoved) {
+                return scanCompressedOnly(clip, manifest)
+            }
             val all = withContext(Dispatchers.IO) { gallery.listAllImages() }
             setProgress(workDataOf(KEY_PROGRESS_DONE to 0, KEY_PROGRESS_TOTAL to all.size))
             showProgressNotification(0, all.size, indeterminate = false)
@@ -124,6 +141,220 @@ class ScanImagesWorker(
             Result.failure()
         } finally {
             clip?.close()
+        }
+    }
+
+    private suspend fun scanCompressedOnly(
+        clip: ClipOnnxEngine,
+        manifest: com.halbertb.clipfinder.data.db.CompressedIndexManifestEntity,
+    ): Result {
+        val mode = SearchCompressionMode.fromPref(manifest.modePref)
+        val all = withContext(Dispatchers.IO) { gallery.listAllImages() }
+        setProgress(workDataOf(KEY_PROGRESS_DONE to 0, KEY_PROGRESS_TOTAL to all.size))
+        showProgressNotification(0, all.size, indeterminate = false)
+
+        val galleryIds = all.map { it.id }.toHashSet()
+        val storedIds = withContext(Dispatchers.IO) { memberDao.getAllMediaIds() }
+        val orphans = computeDeletedMediaIdsForMembershipCleanup(storedIds, galleryIds)
+        withContext(Dispatchers.IO) {
+            orphans.chunked(450).forEach { chunk ->
+                if (chunk.isNotEmpty()) memberDao.deleteByMediaIds(chunk)
+            }
+        }
+        personAliasService.removeDeletedMemberships(orphans)
+        personAliasService.removeDeletedFaceEmbeddingCache(orphans)
+
+        if (mode == SearchCompressionMode.TURBOVEC_4BIT && orphans.isNotEmpty()) {
+            withContext(Dispatchers.Default) {
+                removeFromTurboVecIndex(manifest, orphans)
+            }
+        }
+
+        var processed = 0
+        var indexedNow = 0
+        var skippedUnchanged = 0
+        var decodeFailures = 0
+        val changedMedia = ArrayList<com.halbertb.clipfinder.data.media.GalleryMedia>()
+        val needsFullRebuild =
+            mode == SearchCompressionMode.TURBOQUANT_8BIT &&
+                (orphans.isNotEmpty())
+
+        for (media in all) {
+            if (isStopped) return Result.failure()
+            val existing = withContext(Dispatchers.IO) { memberDao.getById(media.id) }
+            if (existing != null && existing.dateModifiedSec == media.dateModifiedSec) {
+                skippedUnchanged++
+                processed++
+                setProgress(workDataOf(KEY_PROGRESS_DONE to processed, KEY_PROGRESS_TOTAL to all.size))
+                showProgressNotification(processed, all.size, indeterminate = false)
+                continue
+            }
+
+            if (mode == SearchCompressionMode.TURBOQUANT_8BIT) {
+                changedMedia.add(media)
+            } else {
+                val bmp = withContext(Dispatchers.IO) { decodeBitmapForClip(app, media.contentUri) }
+                if (bmp != null) {
+                    val emb = withContext(Dispatchers.Default) { clip.encodeImage(bmp) }
+                    recycleQuietly(bmp)
+                    val updated =
+                        withContext(Dispatchers.Default) {
+                            updateTurboVecIncremental(
+                                manifest = manifest,
+                                mediaId = media.id,
+                                dateModifiedSec = media.dateModifiedSec,
+                                embedding = emb,
+                            )
+                        }
+                    if (updated) {
+                        indexedNow++
+                        changedMedia.add(media)
+                    }
+                } else {
+                    decodeFailures++
+                }
+            }
+
+            processed++
+            setProgress(workDataOf(KEY_PROGRESS_DONE to processed, KEY_PROGRESS_TOTAL to all.size))
+            showProgressNotification(processed, all.size, indeterminate = false)
+        }
+
+        if (mode == SearchCompressionMode.TURBOQUANT_8BIT && (needsFullRebuild || changedMedia.isNotEmpty())) {
+            indexedNow = 0
+            decodeFailures = 0
+            skippedUnchanged = 0
+            val members = ArrayList<CompressedIndexMemberEntity>(all.size)
+            val mediaIds = LongArray(all.size)
+            var writeIndex = 0
+            var dim = 0
+            val vectors = ArrayList<Float>(all.size * 512)
+            processed = 0
+            for (media in all) {
+                if (isStopped) return Result.failure()
+                val bmp = withContext(Dispatchers.IO) { decodeBitmapForClip(app, media.contentUri) }
+                if (bmp != null) {
+                    val emb = withContext(Dispatchers.Default) { clip.encodeImage(bmp) }
+                    recycleQuietly(bmp)
+                    if (dim == 0) dim = emb.size
+                    mediaIds[writeIndex] = media.id
+                    emb.forEach { value -> vectors.add(value) }
+                    members.add(
+                        CompressedIndexMemberEntity(
+                            mediaId = media.id,
+                            dateModifiedSec = media.dateModifiedSec,
+                        ),
+                    )
+                    writeIndex++
+                } else {
+                    decodeFailures++
+                }
+                processed++
+                setProgress(workDataOf(KEY_PROGRESS_DONE to processed, KEY_PROGRESS_TOTAL to all.size))
+                showProgressNotification(processed, all.size, indeterminate = false)
+            }
+            indexedNow = writeIndex
+            if (writeIndex > 0) {
+                withContext(Dispatchers.Default) {
+                    compressedStore
+                        .buildFromPackedVectors(
+                            mode = mode,
+                            mediaIds = mediaIds.copyOf(writeIndex),
+                            values = vectors.toFloatArray(),
+                            dimension = dim,
+                            members = members,
+                            deleteFloats = true,
+                        ).getOrThrow()
+                }
+            }
+        }
+
+        val aliasIds =
+            app.personAliasService
+                .listAliases()
+                .map { it.aliasId }
+        if (aliasIds.isNotEmpty() && changedMedia.isNotEmpty()) {
+            personAliasService.runIncrementalUpdate(aliasIds = aliasIds, media = changedMedia, provenance = "incremental")
+        }
+
+        val count = withContext(Dispatchers.IO) { memberDao.count() }
+        showCompletionNotification(
+            success = true,
+            message = "Compressed scan finished. Updated $indexedNow, unchanged $skippedUnchanged, failures $decodeFailures.",
+        )
+        return Result.success(
+            androidx.work.workDataOf(
+                KEY_INDEXED_NOW to indexedNow,
+                KEY_SKIPPED_UNCHANGED to skippedUnchanged,
+                KEY_DECODE_FAILURES to decodeFailures,
+                KEY_TOTAL_INDEXED to count.toInt(),
+                KEY_REMOVED_STALE to orphans.size,
+            ),
+        )
+    }
+
+    private suspend fun updateTurboVecIncremental(
+        manifest: com.halbertb.clipfinder.data.db.CompressedIndexManifestEntity,
+        mediaId: Long,
+        dateModifiedSec: Long,
+        embedding: FloatArray,
+    ): Boolean {
+        val index =
+            NativeTurboVecIndex.load(manifest.filePath)
+                ?: throw IllegalStateException(
+                    NativeTurboVecIndex.lastFailure ?: "Could not load TurboVec index",
+                )
+        index.use {
+            it.removeIds(longArrayOf(mediaId))
+            val ok =
+                it.addVectors(
+                    vectors = embedding,
+                    mediaIds = longArrayOf(mediaId),
+                    dim = embedding.size,
+                )
+            if (!ok) {
+                throw IllegalStateException(
+                    NativeTurboVecIndex.lastFailure ?: "Could not update TurboVec index",
+                )
+            }
+            if (!it.write(manifest.filePath)) {
+                throw IllegalStateException(
+                    NativeTurboVecIndex.lastFailure ?: "Could not persist TurboVec index",
+                )
+            }
+            memberDao.upsert(
+                CompressedIndexMemberEntity(
+                    mediaId = mediaId,
+                    dateModifiedSec = dateModifiedSec,
+                ),
+            )
+            compressedStore.updateManifestVectorCount(it.vectorCount)
+        }
+        return true
+    }
+
+    private suspend fun removeFromTurboVecIndex(
+        manifest: com.halbertb.clipfinder.data.db.CompressedIndexManifestEntity,
+        mediaIds: List<Long>,
+    ) {
+        if (mediaIds.isEmpty()) return
+        val index =
+            NativeTurboVecIndex.load(manifest.filePath)
+                ?: throw IllegalStateException(
+                    NativeTurboVecIndex.lastFailure ?: "Could not load TurboVec index",
+                )
+        index.use {
+            if (!it.removeIds(mediaIds.toLongArray())) {
+                throw IllegalStateException(
+                    NativeTurboVecIndex.lastFailure ?: "Could not remove ids from TurboVec index",
+                )
+            }
+            if (!it.write(manifest.filePath)) {
+                throw IllegalStateException(
+                    NativeTurboVecIndex.lastFailure ?: "Could not persist TurboVec index",
+                )
+            }
+            compressedStore.updateManifestVectorCount(it.vectorCount)
         }
     }
 

@@ -1,0 +1,11 @@
+/home/halbertb/CLIPFinder/app/src/main/rust/turbovec_jni/target/x86_64-linux-android/release/deps/approx-e13afe4dae7a6f6f.d: /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/lib.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/abs_diff_eq.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/relative_eq.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/ulps_eq.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/macros.rs
+
+/home/halbertb/CLIPFinder/app/src/main/rust/turbovec_jni/target/x86_64-linux-android/release/deps/libapprox-e13afe4dae7a6f6f.rlib: /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/lib.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/abs_diff_eq.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/relative_eq.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/ulps_eq.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/macros.rs
+
+/home/halbertb/CLIPFinder/app/src/main/rust/turbovec_jni/target/x86_64-linux-android/release/deps/libapprox-e13afe4dae7a6f6f.rmeta: /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/lib.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/abs_diff_eq.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/relative_eq.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/ulps_eq.rs /home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/macros.rs
+
+/home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/lib.rs:
+/home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/abs_diff_eq.rs:
+/home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/relative_eq.rs:
+/home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/ulps_eq.rs:
+/home/halbertb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/macros.rs:
